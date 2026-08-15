@@ -6,11 +6,21 @@ unreliable service.
 
 ## Data model
 
-One business table. `tickets` carries `claimed_by_agent_id`, `claimed_at` and
-`last_activity_at` — all three NULL together or set together, enforced by a
-CHECK constraint, so a half-claimed row cannot exist even if application code is
-wrong. The two timestamps are separate because the rule is inactivity-based, not
-age-based: an agent working a ticket for forty minutes must keep it.
+```
+tickets       id, title, customer_email,
+              claimed_by_agent_id, claimed_at, last_activity_at,
+              created_at, updated_at
+
+claim_events  id, ticket_id, agent_id, type('claimed'|'expired'), created_at
+```
+
+Ownership is three columns on the ticket itself, so one owner is one row and the
+guarantee is a single atomic write — no join, no second table to keep in step.
+The three are NULL together or set together, enforced by a CHECK constraint, so
+a half-claimed row cannot exist even if application code is wrong. The two
+timestamps are separate because the rule is inactivity-based, not age-based: an
+agent working a ticket for forty minutes must keep it, and `claimed_at` answers
+"how long have they held this", which is lost the moment you overwrite it.
 
 **Availability is derived, never stored:** a ticket is in the pool when
 `claimed_by_agent_id IS NULL OR last_activity_at < now() - 15 min`. A stored
@@ -19,9 +29,13 @@ a lapse, and the pool has to match reality.
 
 `claim_events` is append-only history: `tickets` only remembers the present, so
 without it there is no answering *how often do claims actually expire* — the
-number that says whether 15 minutes is right. Rejected: a separate claims table
-(below); event sourcing, more machinery than 40 agents justify; a `customers`
-table, when all we do with a customer is send one message.
+number that says whether 15 minutes is right. Queued notifications live in
+pg-boss's own tables, in a separate schema; nothing of ours duplicates them.
+
+Rejected: a stored `status` column, above; a separate claims table, below; event
+sourcing, more machinery than 40 agents justify; a `customers` table, when the
+only thing we do with a customer is send one message, and ticket creation — the
+one flow that would ever reuse a customer record — is out of scope.
 
 ## Three approaches to one owner
 
