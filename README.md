@@ -35,6 +35,36 @@ The seed creates 15 tickets: 10 unclaimed, 3 actively claimed, and **2 whose
 claims already lapsed** — so expiry is observable immediately rather than after a
 15 minute wait.
 
+### Racing several agents for one ticket
+
+```bash
+pnpm race           # 40 agents, first ticket in the pool
+pnpm race 3 10      # 10 agents, ticket 3
+```
+
+Fires real concurrent HTTP claims and reports what each agent got:
+
+```
+40 agents claiming ticket 1 simultaneously
+
+  agent   status  outcome                   time
+  ----------------------------------------------------
+      1   200     claimed it                31ms
+      2   409     ticket already claimed    45ms
+      …
+  1 claimed, 39 rejected
+  → ticket 1 belongs to agent 1
+
+  1 claim event(s) → that many customer notifications queued
+```
+
+Run it a second time on the same ticket: the winning agent gets `200` again —
+claiming is idempotent for the current owner — and the claim history still shows
+a single event, so the customer is not messaged twice.
+
+`pnpm test` asserts the same guarantee, plus expiry, heartbeat and sweeper
+behaviour.
+
 ### Postman
 
 Import `postman_collection.json`. Twelve requests in the order the rules build
