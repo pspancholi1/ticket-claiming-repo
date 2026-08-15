@@ -24,6 +24,9 @@ const EnvSchema = z.object({
     .default("true")
     .transform((v) => v === "true"),
 
+  /** Seconds before the first retry. Backs off exponentially from here. */
+  NOTIFY_RETRY_DELAY_SECONDS: z.coerce.number().int().positive().default(5),
+
   NOTIFY_MIN_LATENCY_MS: z.coerce.number().int().nonnegative().default(2_000),
   NOTIFY_MAX_LATENCY_MS: z.coerce.number().int().nonnegative().default(20_000),
   NOTIFY_FAILURE_RATE: z.coerce.number().min(0).max(1).default(0.2),

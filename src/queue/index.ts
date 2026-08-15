@@ -22,7 +22,7 @@ export const QUEUE = {
  */
 export const NOTIFY_POLICY = {
   retryLimit: 3,
-  retryDelay: 5,
+  retryDelay: config.NOTIFY_RETRY_DELAY_SECONDS,
   retryBackoff: true,
   /** Above the provider's 20s worst case; a hung call must not pin a worker. */
   expireInSeconds: 25,
@@ -46,8 +46,19 @@ boss.on("error", (error) => logger.error({ err: error }, "pg-boss error"));
  */
 export async function startQueue(): Promise<void> {
   await boss.start();
+
   await boss.createQueue(QUEUE.notifyCustomerDlq);
   await boss.createQueue(QUEUE.notifyCustomer, NOTIFY_POLICY);
   await boss.createQueue(QUEUE.sweepExpiredClaims, { retryLimit: 0 });
-  logger.info({ schema: "pgboss" }, "queue ready");
+
+  // createQueue is create-if-absent, so an existing queue keeps whatever policy
+  // it was first created with. Applying it again here means a change to
+  // NOTIFY_POLICY actually takes effect on the next boot rather than silently
+  // doing nothing against a database that already has the queue.
+  await boss.updateQueue(QUEUE.notifyCustomer, NOTIFY_POLICY);
+
+  logger.info(
+    { retryLimit: NOTIFY_POLICY.retryLimit, retryDelay: NOTIFY_POLICY.retryDelay },
+    "queue ready",
+  );
 }

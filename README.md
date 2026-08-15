@@ -65,6 +65,40 @@ a single event, so the customer is not messaged twice.
 `pnpm test` asserts the same guarantee, plus expiry, heartbeat and sweeper
 behaviour.
 
+### Watching the notification behaviour
+
+Claiming returns immediately; the customer message is delivered by a worker
+afterwards. With defaults that takes 2-20 seconds, and fails one time in five —
+faithful to the brief, but awkward to observe. The provider is configurable so
+both paths can be forced.
+
+**Happy path** — fast, always succeeds:
+
+```bash
+NOTIFY_MAX_LATENCY_MS=500 NOTIFY_FAILURE_RATE=0 pnpm dev
+```
+```
+INFO: ticket claimed          ← response already sent
+INFO: customer notified       ← half a second later, out of band
+```
+
+**Failure path** — every attempt fails, retries compressed:
+
+```bash
+NOTIFY_FAILURE_RATE=1 NOTIFY_MAX_LATENCY_MS=400 NOTIFY_RETRY_DELAY_SECONDS=1 pnpm dev
+```
+```
+WARN  customer notification failed, will retry        +0s
+WARN  customer notification failed, will retry        +2s
+WARN  customer notification failed, will retry        +6s
+WARN  customer notification failed, will retry       +14s
+ERROR customer notification permanently failed       +22s   → dead letter queue
+```
+
+Four attempts, exponential backoff, then dead-lettered and logged at error — the
+~1-in-600 case where the customer is never told. With production defaults the
+same sequence takes about 54 seconds, still far inside the 15 minute claim TTL.
+
 ### Postman
 
 Import `postman_collection.json`. Twelve requests in the order the rules build
