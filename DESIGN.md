@@ -28,7 +28,7 @@ agent working a ticket for forty minutes must keep it, and `claimed_at` answers
 a lapse, and the pool has to match reality.
 
 `claim_events` is append-only history: `tickets` only remembers the present, so
-without it there is no answering *how often do claims actually expire* — the
+without it there is no answering _how often do claims actually expire_ — the
 number that says whether 15 minutes is right. Queued notifications live in
 pg-boss's own tables, in a separate schema; nothing of ours duplicates them.
 
@@ -42,13 +42,13 @@ one flow that would ever reuse a customer record — is out of scope.
 **1. Conditional UPDATE (compare-and-swap).** The availability check sits in the
 `WHERE` clause, so checking and claiming are one statement. Postgres locks the
 row for that statement; a concurrent claimer blocks, re-evaluates the predicate
-against the row just written, and gets zero rows. *Cost:* the rule lives in SQL
+against the row just written, and gets zero rows. _Cost:_ the rule lives in SQL
 rather than readable TypeScript, and zero rows does not say **why** it failed.
 
 **2. `SELECT … FOR UPDATE` in a transaction.** Lock the row, decide in
 application code, write, commit. Branching is plain TypeScript, failure reasons
 come for free, and `NOWAIT` lets losers fail fast rather than wait. Paired with
-the same outbox, it is a perfectly correct design. *Cost:* the lock is taken at
+the same outbox, it is a perfectly correct design. _Cost:_ the lock is taken at
 the `SELECT` and held across a round trip back to the application, so it lasts
 strictly longer; the expiry re-check after a lock wait becomes the developer's
 responsibility rather than the database's; and an open transaction is an
@@ -58,7 +58,7 @@ connection pool.
 **3. Separate `ticket_claims` table**, partial unique index on `(ticket_id)
 WHERE released_at IS NULL`. Claiming is an INSERT; the second violates the
 constraint. Strongest guarantee — the schema forbids two owners, not merely the
-query — plus history for free. *Cost:* a lapsed claim still occupies the unique
+query — plus history for free. _Cost:_ a lapsed claim still occupies the unique
 slot, so it must be released before a new insert succeeds: two writes that must
 be atomic, i.e. approach 1 reimplemented inside approach 3. Pool reads become
 joins.
@@ -123,21 +123,3 @@ a courtesy — and it fails loudly, sitting in the dead letter queue, logged at
 error, ready to replay. Delivery is also at-least-once, so a crash after a
 successful send produces a duplicate; the job id goes out as an idempotency key,
 and duplication beats silence.
-
-## With more time, or ten times the traffic
-
-The ownership model does not change; the reads do.
-
-- **Presence.** A WebSocket disconnect is a faster signal than silence: release
-  on disconnect, keep the timeout as the backstop. Relatedly, `heartbeat` is an
-  endpoint here only because replying and note-taking are out of scope — in
-  production it is a side effect of those actions, never a client-side timer,
-  which would prove the tab is open rather than that the agent is working.
-- **Contention.** `POST /tickets/claim-next` with `FOR UPDATE SKIP LOCKED LIMIT 1`,
-  so agents are served one each instead of racing.
-- **Scale-out.** `WORKER_ENABLED=false` already splits worker from API by config.
-  The pool listing is what gets hot: cursor pagination and a short-TTL cache.
-- **Observability**, the real gap: claim conflict rate, expiry rate, notification
-  failure rate, dead letter depth.
-- **Omitted deliberately:** an explicit release endpoint, and a `users` foreign
-  key on `claimed_by_agent_id`.

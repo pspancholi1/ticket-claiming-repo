@@ -35,6 +35,20 @@ The seed creates 15 tickets: 10 unclaimed, 3 actively claimed, and **2 whose
 claims already lapsed** — so expiry is observable immediately rather than after a
 15 minute wait.
 
+### Postman
+
+Import `postman_collection.json`. Twelve requests in the order the rules build
+on each other, each asserting its own expected status — so running the whole
+collection is a pass/fail report of the claiming behaviour (28 assertions). The
+pool request saves an available ticket id into a variable, so the later requests
+need no editing.
+
+```bash
+npx newman run postman_collection.json   # same thing on the command line
+```
+
+### curl
+
 Agent identity is a header. Authentication is out of scope.
 
 ```bash

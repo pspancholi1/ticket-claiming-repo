@@ -1,0 +1,239 @@
+{
+  "info": {
+    "name": "Ticket Claiming Service",
+    "description": "Shared support ticket pool. Agents claim tickets with exclusive ownership; claims lapse after 15 minutes of inactivity.\n\n**Setup**\n1. `docker compose up -d`\n2. `pnpm db:migrate && pnpm db:seed`\n3. `pnpm dev`\n\n**Try it**\nRun the collection top to bottom (Runner, or one request at a time). Each request asserts its own expected status, so a full run is a pass/fail report of the claiming rules.\n\nSeed data: ids 1-10 unclaimed, 11-13 actively claimed, 14-15 already lapsed.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000", "type": "string" },
+    { "key": "agentA", "value": "7", "type": "string" },
+    { "key": "agentB", "value": "9", "type": "string" },
+    { "key": "ticketId", "value": "1", "type": "string" },
+    { "key": "lapsedTicketId", "value": "14", "type": "string" },
+    { "key": "liveTicketId", "value": "11", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "1. Health",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "{{baseUrl}}/healthz", "host": ["{{baseUrl}}"], "path": ["healthz"] },
+        "description": "Liveness check."
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('200 OK', () => pm.response.to.have.status(200));",
+          "pm.test('reports ok', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+        ]}
+      }]
+    },
+    {
+      "name": "2. Pool - available tickets",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/tickets/pool?limit=25&offset=0",
+          "host": ["{{baseUrl}}"], "path": ["tickets", "pool"],
+          "query": [
+            { "key": "limit", "value": "25" },
+            { "key": "offset", "value": "0" }
+          ]
+        },
+        "description": "Unclaimed tickets PLUS tickets whose claim has lapsed.\n\nExpiry is evaluated in this query, so a lapsed ticket appears here the moment it lapses - no background job has to run first.\n\nSaves the first available id to {{ticketId}} for the next requests."
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('200 OK', () => pm.response.to.have.status(200));",
+          "const body = pm.response.json();",
+          "pm.test('returns a pool', () => pm.expect(body.items).to.be.an('array'));",
+          "if (body.items.length) {",
+          "  pm.collectionVariables.set('ticketId', body.items[0].id);",
+          "  console.log('pool:', body.items.map(t => t.id).join(', '));",
+          "}",
+          "pm.test('actively claimed tickets are hidden', () => {",
+          "  const live = Number(pm.collectionVariables.get('liveTicketId'));",
+          "  pm.expect(body.items.map(t => t.id)).to.not.include(live);",
+          "});",
+          "pm.test('lapsed claims are back in the pool', () => {",
+          "  const lapsed = Number(pm.collectionVariables.get('lapsedTicketId'));",
+          "  pm.expect(body.items.map(t => t.id)).to.include(lapsed);",
+          "});"
+        ]}
+      }]
+    },
+    {
+      "name": "3. Claim - agent A succeeds",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "X-Agent-Id", "value": "{{agentA}}" }],
+        "url": { "raw": "{{baseUrl}}/tickets/{{ticketId}}/claim", "host": ["{{baseUrl}}"], "path": ["tickets", "{{ticketId}}", "claim"] },
+        "description": "Takes ownership via a single compare-and-swap UPDATE.\n\nReturns immediately - the customer notification is queued in the same transaction and delivered by a background worker 2-20s later. Watch the server logs for `customer notified`.\n\n`expiresAt` tells the client when this claim lapses if the agent goes quiet."
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('200 OK', () => pm.response.to.have.status(200));",
+          "const t = pm.response.json();",
+          "pm.test('owned by agent A', () => pm.expect(String(t.claimedByAgentId)).to.eql(pm.collectionVariables.get('agentA')));",
+          "pm.test('returns an expiry deadline', () => pm.expect(t.expiresAt).to.be.a('string'));",
+          "pm.test('responds fast - the slow call is not in the request path', () => pm.expect(pm.response.responseTime).to.be.below(1000));"
+        ]}
+      }]
+    },
+    {
+      "name": "4. Claim - agent B is refused (409)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "X-Agent-Id", "value": "{{agentB}}" }],
+        "url": { "raw": "{{baseUrl}}/tickets/{{ticketId}}/claim", "host": ["{{baseUrl}}"], "path": ["tickets", "{{ticketId}}", "claim"] },
+        "description": "The compare-and-swap matches zero rows because the ticket now has a fresh owner. Zero rows is the loss signal."
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+          "pm.test('says why', () => pm.expect(pm.response.json().error.code).to.eql('TICKET_ALREADY_CLAIMED'));"
+        ]}
+      }]
+    },
+    {
+      "name": "5. Claim - agent A again is idempotent (200)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "X-Agent-Id", "value": "{{agentA}}" }],
+        "url": { "raw": "{{baseUrl}}/tickets/{{ticketId}}/claim", "host": ["{{baseUrl}}"], "path": ["tickets", "{{ticketId}}", "claim"] },
+        "description": "A double click, or a request retried by a proxy, must not fail. The agent already owns it, so this succeeds - and does NOT send the customer a second message."
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('200 OK, not a conflict', () => pm.response.to.have.status(200));",
+          "pm.test('still owned by agent A', () => pm.expect(String(pm.response.json().claimedByAgentId)).to.eql(pm.collectionVariables.get('agentA')));"
+        ]}
+      }]
+    },
+    {
+      "name": "6. Heartbeat - agent A extends the claim",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "X-Agent-Id", "value": "{{agentA}}" }],
+        "url": { "raw": "{{baseUrl}}/tickets/{{ticketId}}/heartbeat", "host": ["{{baseUrl}}"], "path": ["tickets", "{{ticketId}}", "heartbeat"] },
+        "description": "Records agent activity, pushing the deadline out by another full TTL.\n\nStands in for real agent actions (replying, adding a note, opening the ticket). In production this update runs as a side effect of those - never as a client-side timer, which would only prove the tab is open."
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('200 OK', () => pm.response.to.have.status(200));",
+          "const t = pm.response.json();",
+          "pm.test('deadline moved into the future', () => pm.expect(new Date(t.expiresAt).getTime()).to.be.above(Date.now()));"
+        ]}
+      }]
+    },
+    {
+      "name": "7. Heartbeat - agent B is refused (409)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "X-Agent-Id", "value": "{{agentB}}" }],
+        "url": { "raw": "{{baseUrl}}/tickets/{{ticketId}}/heartbeat", "host": ["{{baseUrl}}"], "path": ["tickets", "{{ticketId}}", "heartbeat"] },
+        "description": "Every write re-checks ownership AND freshness. This is the fence: an agent whose claim lapsed while they were reading cannot overwrite whoever took it over."
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+          "pm.test('says why', () => pm.expect(pm.response.json().error.code).to.eql('CLAIM_NOT_HELD'));"
+        ]}
+      }]
+    },
+    {
+      "name": "8. Take over a lapsed claim",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "X-Agent-Id", "value": "{{agentB}}" }],
+        "url": { "raw": "{{baseUrl}}/tickets/{{lapsedTicketId}}/claim", "host": ["{{baseUrl}}"], "path": ["tickets", "{{lapsedTicketId}}", "claim"] },
+        "description": "Ticket 14 was claimed 20 minutes ago and never touched again, so the claim has lapsed. Another agent can take it - and the original owner's heartbeat would now be rejected."
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('200 OK', () => pm.response.to.have.status(200));",
+          "pm.test('ownership transferred to agent B', () => pm.expect(String(pm.response.json().claimedByAgentId)).to.eql(pm.collectionVariables.get('agentB')));"
+        ]}
+      }]
+    },
+    {
+      "name": "9. My tickets",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "X-Agent-Id", "value": "{{agentA}}" }],
+        "url": { "raw": "{{baseUrl}}/tickets/mine", "host": ["{{baseUrl}}"], "path": ["tickets", "mine"] },
+        "description": "Live claims held by this agent. Lapsed claims are excluded - they are gone."
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('200 OK', () => pm.response.to.have.status(200));",
+          "pm.test('includes the ticket agent A claimed', () => {",
+          "  const ids = pm.response.json().items.map(t => String(t.id));",
+          "  pm.expect(ids).to.include(String(pm.collectionVariables.get('ticketId')));",
+          "});"
+        ]}
+      }]
+    },
+    {
+      "name": "10. Claim history",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/tickets/{{lapsedTicketId}}/events?limit=50",
+          "host": ["{{baseUrl}}"], "path": ["tickets", "{{lapsedTicketId}}", "events"],
+          "query": [{ "key": "limit", "value": "50" }]
+        },
+        "description": "Append-only history. The tickets table only remembers the present, so this is what answers 'how often do claims actually expire?' - the number that says whether 15 minutes is the right TTL."
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('200 OK', () => pm.response.to.have.status(200));",
+          "pm.test('records the claim', () => {",
+          "  const types = pm.response.json().items.map(e => e.type);",
+          "  pm.expect(types).to.include('claimed');",
+          "});"
+        ]}
+      }]
+    },
+    {
+      "name": "11. Error - unknown ticket (404)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "X-Agent-Id", "value": "{{agentA}}" }],
+        "url": { "raw": "{{baseUrl}}/tickets/999999/claim", "host": ["{{baseUrl}}"], "path": ["tickets", "999999", "claim"] },
+        "description": "A failed claim returns zero rows for BOTH 'does not exist' and 'someone else holds it'. One extra read on the failure path separates them, so the agent gets a useful answer."
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('404 Not Found', () => pm.response.to.have.status(404));",
+          "pm.test('distinguished from a conflict', () => pm.expect(pm.response.json().error.code).to.eql('TICKET_NOT_FOUND'));"
+        ]}
+      }]
+    },
+    {
+      "name": "12. Error - missing agent header (400)",
+      "request": {
+        "method": "POST",
+        "url": { "raw": "{{baseUrl}}/tickets/{{ticketId}}/claim", "host": ["{{baseUrl}}"], "path": ["tickets", "{{ticketId}}", "claim"] },
+        "description": "Authentication is out of scope, so identity arrives in the X-Agent-Id header. It is still validated."
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+          "pm.test('says what is wrong', () => pm.expect(pm.response.json().error.code).to.eql('AGENT_ID_REQUIRED'));"
+        ]}
+      }]
+    }
+  ]
+}
